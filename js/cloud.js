@@ -137,6 +137,11 @@
 						return { name: it.name.replace(/\.km$/i, ''), path: it.path, sha: it.sha, size: it.size };
 					})
 					.sort(function(a, b) { return a.name.localeCompare(b.name, 'zh'); });
+			})
+			.catch(function(err) {
+				// GitHub 不保留空目录：目录不存在(404)时视为空列表
+				if (err && err.message && err.message.indexOf('HTTP 404') > -1) return [];
+				throw err;
 			});
 	}
 
