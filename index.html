@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8">
+	<title>我的脑图 - KityMinder（百度脑图内核）</title>
+
+	<link href="favicon.ico" type="image/x-icon" rel="shortcut icon">
+
+	<link rel="stylesheet" href="css/bootstrap.min.css" />
+	<link rel="stylesheet" href="css/codemirror.css" />
+	<link rel="stylesheet" href="css/kityminder.core.css" />
+	<link rel="stylesheet" href="css/kityminder.editor.min.css">
+
+	<style>
+		html, body {
+			margin: 0;
+			padding: 0;
+			height: 100%;
+			overflow: hidden;
+		}
+		.editor-title {
+			background: #393F4F;
+			color: white;
+			margin: 0;
+			height: 44px;
+			font-size: 14px;
+			line-height: 44px;
+			font-family: 'Hiragino Sans GB', 'Arial', 'Microsoft Yahei';
+			font-weight: normal;
+			padding: 0 20px;
+			position: relative;
+			z-index: 20;
+		}
+		.editor-title .title-brand {
+			color: #fff;
+		}
+		.editor-title .title-brand .km-badge {
+			display: inline-block;
+			background: #4A90E2;
+			border-radius: 3px;
+			font-size: 12px;
+			padding: 2px 6px;
+			margin-right: 8px;
+			vertical-align: 2px;
+		}
+		.editor-title .cloud-bar {
+			float: right;
+			line-height: 44px;
+			font-size: 13px;
+		}
+		.editor-title .cloud-bar .btn {
+			padding: 3px 12px;
+			margin-left: 8px;
+			font-size: 13px;
+			border-radius: 3px;
+		}
+		.editor-title .cloud-status {
+			margin-right: 10px;
+			color: #B8C0D0;
+		}
+		.editor-title .cloud-status.online {
+			color: #6FCF97;
+		}
+		.editor-title .cloud-status.syncing {
+			color: #F2C94C;
+		}
+		.editor-title .cloud-status.error {
+			color: #EB5757;
+		}
+		.editor-title .file-name {
+			color: #F2C94C;
+			margin-right: 12px;
+		}
+		.minder-editor-container {
+			position: absolute;
+			top: 44px;
+			bottom: 0;
+			left: 0;
+			right: 0;
+		}
+		.modal { z-index: 1050; }
+		.modal .modal-content { border-radius: 6px; }
+		.modal label { font-weight: normal; color: #555; }
+		.modal .help-text { font-size: 12px; color: #999; }
+		.file-list-item { cursor: pointer; }
+		.file-list-item:hover { background: #eff3fa; }
+		.file-list-item .file-meta { font-size: 12px; color: #999; }
+		.file-list-item .del-btn { opacity: 0; }
+		.file-list-item:hover .del-btn { opacity: 1; }
+		.toast-msg {
+			position: fixed;
+			top: 54px;
+			left: 50%;
+			transform: translateX(-50%);
+			background: rgba(0,0,0,.78);
+			color: #fff;
+			padding: 8px 18px;
+			border-radius: 4px;
+			font-size: 13px;
+			z-index: 2000;
+			display: none;
+		}
+	</style>
+</head>
+<body ng-app="kityminderDemo" ng-controller="MainController">
+<h1 class="editor-title">
+	<span class="title-brand"><span class="km-badge">脑图</span>我的脑图</span>
+	<span class="cloud-bar">
+		<span class="cloud-status" id="cloudStatus">未连接云端</span>
+		<span class="file-name" id="currentFileName"></span>
+		<button class="btn btn-default btn-sm" id="btnNew">新建</button>
+		<button class="btn btn-default btn-sm" id="btnOpen">打开云端</button>
+		<button class="btn btn-primary btn-sm" id="btnSave">保存</button>
+		<button class="btn btn-default btn-sm" id="btnSettings">设置</button>
+	</span>
+</h1>
+<kityminder-editor on-init="initEditor(editor, minder)"></kityminder-editor>
+
+<div class="toast-msg" id="toastMsg"></div>
+
+<!-- 设置模态框 -->
+<div class="modal fade" id="settingsModal" tabindex="-1">
+	<div class="modal-dialog">
+		<div class="modal-content">
+			<div class="modal-header">
+				<button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
+				<h4 class="modal-title">云端设置（GitHub 私有仓库）</h4>
+			</div>
+			<div class="modal-body">
+				<div class="form-group">
+					<label>GitHub Token（个人访问令牌）</label>
+					<input type="password" class="form-control" id="settingToken" placeholder="ghp_xxx 或 github_pat_xxx">
+					<div class="help-text">在 GitHub → Settings → Developer settings → Personal access tokens 生成，勾选 repo 权限（Fine-grained 需勾选 Contents 读写）。Token 仅保存在本浏览器 localStorage 中。</div>
+				</div>
+				<div class="form-group">
+					<label>仓库名（存脑图数据的私有仓库）</label>
+					<input type="text" class="form-control" id="settingRepo" placeholder="用户名/仓库名，如 myname/mindmap-data">
+					<div class="help-text">可以是一个专门存放数据的 <b>私有仓库</b>（新建时不要勾选 README，或已有空仓库均可）。脑图文件会保存在该仓库 mindmaps/ 目录下。</div>
+				</div>
+				<div class="form-group">
+					<label>云端目录（可选）</label>
+					<input type="text" class="form-control" id="settingDir" placeholder="默认 mindmaps">
+					<div class="help-text">脑图 .km 文件在仓库中的存放目录，默认 mindmaps。</div>
+				</div>
+				<div class="form-group">
+					<label>自动保存</label>
+					<select class="form-control" id="settingAutoSave">
+						<option value="1">开启（编辑后自动保存到云端）</option>
+						<option value="0">关闭（仅手动点保存）</option>
+					</select>
+				</div>
+			</div>
+			<div class="modal-footer">
+				<button type="button" class="btn btn-default" data-dismiss="modal">取消</button>
+				<button type="button" class="btn btn-primary" id="btnSaveSettings">保存设置</button>
+			</div>
+		</div>
+	</div>
+</div>
+
+<!-- 打开云端模态框 -->
+<div class="modal fade" id="openModal" tabindex="-1">
+	<div class="modal-dialog">
+		<div class="modal-content">
+			<div class="modal-header">
+				<button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
+				<h4 class="modal-title">打开云端脑图</h4>
+			</div>
+			<div class="modal-body">
+				<div class="help-text" id="openHelp">点击文件打开，鼠标悬停可删除。</div>
+				<ul class="list-group" id="fileList" style="max-height: 380px; overflow-y: auto;"></ul>
+			</div>
+			<div class="modal-footer">
+				<button type="button" class="btn btn-default" data-dismiss="modal">关闭</button>
+			</div>
+		</div>
+	</div>
+</div>
+
+<!-- 新建模态框 -->
+<div class="modal fade" id="newModal" tabindex="-1">
+	<div class="modal-dialog modal-sm">
+		<div class="modal-content">
+			<div class="modal-header">
+				<button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
+				<h4 class="modal-title" id="newModalTitle">新建脑图</h4>
+			</div>
+			<div class="modal-body">
+				<div class="form-group">
+					<label>文件名（不需要扩展名）</label>
+					<input type="text" class="form-control" id="newFileName" placeholder="例如：产品规划">
+				</div>
+			</div>
+			<div class="modal-footer">
+				<button type="button" class="btn btn-default" data-dismiss="modal">取消</button>
+				<button type="button" class="btn btn-primary" id="btnConfirmNew">确定</button>
+			</div>
+		</div>
+	</div>
+</div>
+
+<script src="js/jquery.min.js"></script>
+<script src="js/bootstrap.min.js"></script>
+<script src="js/angular.min.js"></script>
+<script src="js/ui-bootstrap-tpls.min.js"></script>
+<script src="js/codemirror.min.js"></script>
+<script src="js/codemirror-xml.min.js"></script>
+<script src="js/codemirror-javascript.min.js"></script>
+<script src="js/codemirror-css.min.js"></script>
+<script src="js/codemirror-htmlmixed.min.js"></script>
+<script src="js/codemirror-markdown.min.js"></script>
+<script src="js/codemirror-overlay.min.js"></script>
+<script src="js/codemirror-gfm.min.js"></script>
+<script src="js/ui-codemirror.min.js"></script>
+<script src="js/marked.min.js"></script>
+<script src="js/kity.min.js"></script>
+<script src="js/hotbox.js"></script>
+<script src="js/kityminder.core.min.js"></script>
+<script src="js/color-picker.min.js"></script>
+
+<script src="js/kityminder.editor.js"></script>
+<script src="js/cloud.js"></script>
+
+<script>
+	angular.module('kityminderDemo', ['kityminderEditor'])
+		.controller('MainController', function($scope) {
+			$scope.initEditor = function(editor, minder) {
+				window.editor = editor;
+				window.minder = minder;
+				if (window.CloudSync) {
+					window.CloudSync.init(editor, minder);
+				}
+			};
+		});
+</script>
+
+</body>
+</html>
