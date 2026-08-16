@@ -34,26 +34,15 @@
 	 *
 	 * 由 tools/gen-config.js 生成：用你指定的"唯一密码"加密 Client ID / Secret。
 	 * 任何浏览器打开网站 → 输入这个唯一密码 → 自动解密出凭据 → 点「使用 Gitee 登录」即可。
+	 * 凭据不以明文出现，只有知道密码的人才能解开。
 	 *
-	 * 抗撞库设计（v8）：
-	 *  - iterations=1500000：PBKDF2 迭代 150 万次（原 15 万次的 10 倍），
-	 *    每个候选密码的离线验证成本 ×10；
-	 *  - verifierSegs 分段验证：4 段独立 AES-GCM 密文，全部解密匹配才通过，
-	 *    每次猜测还需 4 次 GCM 认证，且无法跳过。
-	 *  - 组合后撞库总成本约为旧方案的 10~15 倍。
-	 *  - 数据加密（DATA_SALT）仍用 15 万次迭代，保证已存数据完全兼容。
+	 * 若留空（未配置），则回退到「设置」里每浏览器手动填写 Client ID/Secret 的方式。
 	 */
 	var BUILTIN_GITEE_APP = {
-		salt: 'n3zwD+8qR1X1XlypoDA3dw==',
-		iterations: 1500000,
-		clientIdEnc: 'UtGQcAzWaLCsmVT0.RjS6VK0I7/hkr7963FQl3HvUo9k+5u+YpT1OeDgZfcLWGrMX0BmUBEzRI06ft0OER81Bc9pzBPccIx9f90iQnEb5d3iO4EoUo7TL4bDdnFY=',
-		clientSecretEnc: 'fehdohM1a9DRTCF0.fba8aFE6iFR43LSy4qLeAnzm7xtbxAsmJGXlCeGwEPcRe9US5Bw6T8z0/BsfdUpnfqlBXXOxTtV3a8rRCTaNDn53rwLg9WmLyUtU2FWFb3k=',
-		verifierSegs: [
-			'4mOLx9AWvOTV0HCy.O/J8ddOqB5JWs5OCGWuMdBV/OIAwxwNDFztse4wZW11R+aM=',
-			'BgPXzFkDhQQLq3OY.HrGYrZ8AONbiURBVAqIqAlsePUi4zzVQIWZieQm5zhy/y08=',
-			'39XNR3Xtka4IAt7n.Nw3wpNHHX3T8EXmN+xV/bmzyN/YOz60TRH79OYUN4DavG7o=',
-			'7XbdVzabJbZPty5f.glaHBtE6LS7Mh6L0vpj6bmpu3PwUoOxmYwIbs9UQwL3m1tk='
-		]
+		salt: 'tzMP/9OKJfTHm7nzv+iWEA==',
+		clientIdEnc: 'DK8NFpUj9pfgvrd/.gRU/sIbNZHRWMK5EtBdN13+pGmMG27QYrXVWmoLA2+6jY6K6/Bh45R7vizdQRhjaaVLi7HYL5sTHXhT1LjYyct+O+0tH9JUdqEnsYrzpRF0=',
+		clientSecretEnc: 'Hk23yXvs40xUzeRa.eD+3KtTlfhU6lJ1v4BIbZnbBWfWCNlfwoqXZZkh7Z0ggSUO1fAlqj6p/Y3NdlB2R6bPmRsZWFumAMdcIYqgkPUNPAOa3aJFo2dqzSaOG/GE=',
+		verifierEnc: 'u1oc/lP5zCj4e/aY.oxLdi9Bp74tWPFYBjRKILUGvxAs6lux9VQb+YhV7OsGjfBY='
 	};
 	var MASTER_VERIFY_TEXT = 'km-master-verify-v1';
 
@@ -115,7 +104,7 @@
 
 	/* ---------------- 密码派生与加解密 (Web Crypto) ---------------- */
 
-	function deriveKey(password, saltBuf, iterations) {
+	function deriveKey(password, saltBuf) {
 		var enc = new TextEncoder();
 		return getSubtle().importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey'])
 			.then(function(baseKey) {
@@ -123,7 +112,7 @@
 					{
 						name: 'PBKDF2',
 						salt: saltBuf,
-						iterations: iterations || PBKDF2_ITERATIONS,
+						iterations: PBKDF2_ITERATIONS,
 						hash: 'SHA-256'
 					},
 					baseKey,
@@ -241,20 +230,7 @@
 	/* ---------------- 全局唯一密码（Master Password） ---------------- */
 
 	function hasBuiltinApp() {
-		return !!(BUILTIN_GITEE_APP && BUILTIN_GITEE_APP.salt && BUILTIN_GITEE_APP.clientIdEnc && BUILTIN_GITEE_APP.clientSecretEnc &&
-			(BUILTIN_GITEE_APP.verifierSegs || BUILTIN_GITEE_APP.verifierEnc));
-	}
-
-	function masterIterations() {
-		// 抗撞库：内置应用使用高迭代（默认 150 万次）；兼容旧配置（无 iterations 字段 -> 15 万次）
-		return BUILTIN_GITEE_APP.iterations || PBKDF2_ITERATIONS;
-	}
-
-	/** 解密 "iv.data" 格式的密文 */
-	function aesDecryptBlob(key, blob) {
-		var dot = blob.indexOf('.');
-		if (dot < 0) return Promise.reject(new Error('密文格式错误'));
-		return aesDecrypt(key, blob.substring(0, dot), blob.substring(dot + 1));
+		return !!(BUILTIN_GITEE_APP && BUILTIN_GITEE_APP.salt && BUILTIN_GITEE_APP.clientIdEnc && BUILTIN_GITEE_APP.clientSecretEnc && BUILTIN_GITEE_APP.verifierEnc);
 	}
 
 	/**
@@ -264,28 +240,18 @@
 	 */
 	function tryMasterUnlock(password) {
 		if (!hasBuiltinApp()) return Promise.resolve(null);
-		return deriveKey(password, b64ToBuf(BUILTIN_GITEE_APP.salt), masterIterations()).then(function(key) {
-			// 验证：全部验证段解密成功且匹配 = 密码正确（抗撞库：多段 GCM 认证）
-			var segs = BUILTIN_GITEE_APP.verifierSegs && BUILTIN_GITEE_APP.verifierSegs.length
-				? BUILTIN_GITEE_APP.verifierSegs
-				: [BUILTIN_GITEE_APP.verifierEnc];
-			var verifyChain = Promise.resolve();
-			segs.forEach(function(seg) {
-				verifyChain = verifyChain.then(function(ok) {
-					if (ok === false) return false; // 已失败，跳过后续
-					return aesDecryptBlob(key, seg).then(function(text) {
-						return text === MASTER_VERIFY_TEXT;
-					}).catch(function() { return false; });
-				});
-			});
-			return verifyChain.then(function(ok) {
-				if (!ok) return null;
+		return deriveKey(password, b64ToBuf(BUILTIN_GITEE_APP.salt)).then(function(key) {
+			// 验证文本解密成功 = 密码正确
+			return aesDecrypt(key, BUILTIN_GITEE_APP.verifierEnc.split('.')[0], BUILTIN_GITEE_APP.verifierEnc.split('.').slice(1).join('.')).then(function(text) {
+				if (text !== MASTER_VERIFY_TEXT) return null;
 				// 解密应用凭据
-				return aesDecryptBlob(key, BUILTIN_GITEE_APP.clientIdEnc).then(function(clientId) {
-					return aesDecryptBlob(key, BUILTIN_GITEE_APP.clientSecretEnc).then(function(clientSecret) {
+				return aesDecrypt(key, BUILTIN_GITEE_APP.clientIdEnc.split('.')[0], BUILTIN_GITEE_APP.clientIdEnc.split('.').slice(1).join('.')).then(function(clientId) {
+					return aesDecrypt(key, BUILTIN_GITEE_APP.clientSecretEnc.split('.')[0], BUILTIN_GITEE_APP.clientSecretEnc.split('.').slice(1).join('.')).then(function(clientSecret) {
 						return { key: key, clientId: clientId, clientSecret: clientSecret };
 					});
 				});
+			}).catch(function() {
+				return null; // 密码错误 -> 解密失败
 			});
 		});
 	}
@@ -1126,8 +1092,6 @@
 	}
 
 	function doUnlockWithPassword(pw1) {
-		// 抗撞库：高迭代派生需要 1-2 秒，给出提示
-		$('#lockHint').text('正在验证密码（约 1-2 秒）…').css('color', '#999');
 		// 解锁（分两种模式）
 		var unlockPromise;
 		if (hasBuiltinApp()) {
