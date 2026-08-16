@@ -30,23 +30,21 @@
 	var DATA_SALT = 'km-data-v1-fixed-salt';
 	var ENC_PREFIX = 'KMENC1:';
 
-	/* ---------------- 内置 Gitee 应用（免配置） ----------------
+	/* ---------------- 内置 Gitee 应用（密文，免配置） ----------------
 	 *
-	 * 把 Client ID / Client Secret 填在这里并推送到仓库后，
-	 * 任何浏览器打开网站都无需再填应用凭据，只需点「使用 Gitee 登录」授权。
-	 * 这是"只填一次、换浏览器免填"的实现方式（凭据随网站代码分发）。
+	 * 由 tools/gen-config.js 生成：用你指定的"唯一密码"加密 Client ID / Secret。
+	 * 任何浏览器打开网站 → 输入这个唯一密码 → 自动解密出凭据 → 点「使用 Gitee 登录」即可。
+	 * 凭据不以明文出现，只有知道密码的人才能解开。
 	 *
-	 * 说明：
-	 *  - Gitee 强制要求 client_secret（实测无 secret 返回 invalid_client），且不支持 PKCE，
-	 *    纯前端应用要免配置只能把应用凭据内置到代码。
-	 *  - 应用凭据只代表"应用身份"而非"用户身份"，授权仍须你本人在 Gitee 页面确认；
-	 *    若你更在意凭据保密，可留空此项，改为在每台浏览器「设置」里手动填写。
-	 *  - 在 Gitee → 设置 → 安全设置 → 第三方应用 创建应用后，把两个值填到下面。
+	 * 若留空（未配置），则回退到「设置」里每浏览器手动填写 Client ID/Secret 的方式。
 	 */
 	var BUILTIN_GITEE_APP = {
-		clientId: '',
-		clientSecret: ''
+		salt: '',            // 固定盐（base64）——用于从密码派生密钥
+		clientIdEnc: '',     // AES-GCM 密文：Client ID
+		clientSecretEnc: '', // AES-GCM 密文：Client Secret
+		verifierEnc: ''      // AES-GCM 密文：验证文本（校验密码是否正确）
 	};
+	var MASTER_VERIFY_TEXT = 'km-master-verify-v1';
 
 	/* ---------------- 状态 ---------------- */
 
@@ -60,6 +58,8 @@
 	var unlocked = false;
 	var unlockKey = null;        // CryptoKey，由密码派生
 	var dataKey = null;          // CryptoKey，数据加密密钥（固定盐 + 密码派生，跨设备一致）
+	var masterClientId = null;   // 全局密码解锁后解密出的内置 Client ID（仅内存）
+	var masterClientSecret = null; // 全局密码解锁后解密出的内置 Client Secret（仅内存）
 	var pendingOAuth = null;     // { code, state } 待处理的 Gitee OAuth 回调
 	var oauthRefreshing = false; // 防止并发刷新 token
 
@@ -227,6 +227,40 @@
 		});
 	}
 
+	/* ---------------- 全局唯一密码（Master Password） ---------------- */
+
+	function hasBuiltinApp() {
+		return !!(BUILTIN_GITEE_APP && BUILTIN_GITEE_APP.salt && BUILTIN_GITEE_APP.clientIdEnc && BUILTIN_GITEE_APP.clientSecretEnc && BUILTIN_GITEE_APP.verifierEnc);
+	}
+
+	/**
+	 * 用输入的全局密码派生密钥并校验：
+	 *  - 校验通过：返回 { key, clientId, clientSecret }（解密内置密文）
+	 *  - 校验失败：返回 null
+	 */
+	function tryMasterUnlock(password) {
+		if (!hasBuiltinApp()) return Promise.resolve(null);
+		return deriveKey(password, b64ToBuf(BUILTIN_GITEE_APP.salt)).then(function(key) {
+			// 验证文本解密成功 = 密码正确
+			return aesDecrypt(key, BUILTIN_GITEE_APP.verifierEnc.split('.')[0], BUILTIN_GITEE_APP.verifierEnc.split('.').slice(1).join('.')).then(function(text) {
+				if (text !== MASTER_VERIFY_TEXT) return null;
+				// 解密应用凭据
+				return aesDecrypt(key, BUILTIN_GITEE_APP.clientIdEnc.split('.')[0], BUILTIN_GITEE_APP.clientIdEnc.split('.').slice(1).join('.')).then(function(clientId) {
+					return aesDecrypt(key, BUILTIN_GITEE_APP.clientSecretEnc.split('.')[0], BUILTIN_GITEE_APP.clientSecretEnc.split('.').slice(1).join('.')).then(function(clientSecret) {
+						return { key: key, clientId: clientId, clientSecret: clientSecret };
+					});
+				});
+			}).catch(function() {
+				return null; // 密码错误 -> 解密失败
+			});
+		});
+	}
+
+	/** 全局密码模式下，用同一密码派生数据加密密钥（固定盐，跨设备一致） */
+	function deriveMasterDataKey(password) {
+		return deriveKey(password, new TextEncoder().encode(DATA_SALT));
+	}
+
 	/* ---------------- 配置（Token 加密存储） ---------------- */
 
 	function loadConfig() {
@@ -337,9 +371,9 @@
 		if (config.giteeApp && config.giteeApp.clientId && config.giteeApp.clientSecretEnc) {
 			return config.giteeApp;
 		}
-		// 其次：内置应用（换浏览器免配置）
-		if (BUILTIN_GITEE_APP && BUILTIN_GITEE_APP.clientId && BUILTIN_GITEE_APP.clientSecret) {
-			return { clientId: BUILTIN_GITEE_APP.clientId, clientSecretEnc: null, builtin: true };
+		// 其次：内置应用（密文，需全局密码解锁后才有明文；解锁后 masterClientId 在内存）
+		if (masterClientId && masterClientSecret) {
+			return { clientId: masterClientId, clientSecretEnc: null, builtin: true };
 		}
 		return null;
 	}
@@ -359,9 +393,9 @@
 			toast('请先解锁页面');
 			return;
 		}
-		// 解密 client_secret（内置应用直接用明文）
+		// 解密 client_secret（内置应用已在解锁时解密到内存）
 		var secretPromise = app.builtin
-			? Promise.resolve(BUILTIN_GITEE_APP.clientSecret)
+			? Promise.resolve(masterClientSecret)
 			: aesDecrypt(unlockKey, app.clientSecretEnc.iv, app.clientSecretEnc.data);
 		secretPromise.then(function(secret) {
 			var state = Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -411,7 +445,7 @@
 		var code = pendingOAuth.code;
 		pendingOAuth = null;
 		var secretPromise = app.builtin
-			? Promise.resolve(BUILTIN_GITEE_APP.clientSecret)
+			? Promise.resolve(masterClientSecret)
 			: aesDecrypt(unlockKey, app.clientSecretEnc.iv, app.clientSecretEnc.data);
 		return secretPromise.then(function(secret) {
 			var body = 'grant_type=authorization_code' +
@@ -922,7 +956,14 @@
 	function showLockScreen(firstTime) {
 		$('#lockScreen').show();
 		$('#editorArea').hide();
-		if (firstTime) {
+		if (hasBuiltinApp()) {
+			// 内置密文凭据：全局唯一密码模式（任何浏览器同一密码）
+			$('#lockTitle').text('输入访问密码');
+			$('#lockSub').text('输入你的唯一密码解锁（密码同时解密内置的 Gitee 应用凭据，任何设备通用）');
+			$('#lockPw2').hide();
+			$('#lockBtn').text('解锁');
+			$('#lockHint').text('');
+		} else if (firstTime) {
 			$('#lockTitle').text('首次使用：设置访问密码');
 			$('#lockSub').text('此密码同时用于加密云端脑图数据，请牢记！多设备请设置同一密码');
 			$('#lockPw2').show();
@@ -947,6 +988,11 @@
 
 	function handleLockSubmit() {
 		var pw1 = $('#lockPw1').val();
+		if (hasBuiltinApp()) {
+			// 全局密码模式：直接走解锁逻辑
+			doUnlockWithPassword(pw1);
+			return;
+		}
 		if (!hasLock()) {
 			// 首次设置
 			var pw2 = $('#lockPw2').val();
@@ -985,28 +1031,59 @@
 			});
 			return;
 		}
-		// 解锁
-		tryUnlock(pw1).then(function(key) {
-			if (!key) {
-				$('#lockHint').text('密码错误，请重试').css('color', '#EB5757');
-				return Promise.reject(new Error('__wrong_password__'));
-			}
-			unlockKey = key;
-			unlocked = true;
-			// 派生数据加密密钥（固定盐，跨设备一致）
-			return deriveDataKey(pw1).then(function(dk) {
-				dataKey = dk;
-				// 解密 Token 到内存供请求使用
-				return getToken(key).then(function(token) {
-					config._token = token;
-					// 迁移旧明文 token
-					if (config.token) {
-						return setToken(key, token);
-					}
-					return null;
+		// 无内置应用：设备本地密码锁解锁
+		doUnlockWithPassword(pw1);
+	}
+
+	function doUnlockWithPassword(pw1) {
+		// 解锁（分两种模式）
+		var unlockPromise;
+		if (hasBuiltinApp()) {
+			// 模式A：内置密文凭据 —— 用全局唯一密码解锁，并解密出应用凭据
+			unlockPromise = tryMasterUnlock(pw1).then(function(master) {
+				if (!master) {
+					$('#lockHint').text('密码错误，请重试').css('color', '#EB5757');
+					return Promise.reject(new Error('__wrong_password__'));
+				}
+				unlockKey = master.key;
+				unlocked = true;
+				masterClientId = master.clientId;
+				masterClientSecret = master.clientSecret;
+				// 数据密钥：同一密码派生（固定盐，跨设备一致）
+				return deriveMasterDataKey(pw1).then(function(dk) {
+					dataKey = dk;
+					// 尝试解密本地保存的 Token（若有）
+					return getToken(master.key).then(function(token) {
+						config._token = token;
+						return null;
+					});
 				});
 			});
-		}).then(function() {
+		} else {
+			// 模式B：无内置 —— 设备本地密码锁
+			unlockPromise = tryUnlock(pw1).then(function(key) {
+				if (!key) {
+					$('#lockHint').text('密码错误，请重试').css('color', '#EB5757');
+					return Promise.reject(new Error('__wrong_password__'));
+				}
+				unlockKey = key;
+				unlocked = true;
+				// 派生数据加密密钥（固定盐，跨设备一致）
+				return deriveDataKey(pw1).then(function(dk) {
+					dataKey = dk;
+					// 解密 Token 到内存供请求使用
+					return getToken(key).then(function(token) {
+						config._token = token;
+						// 迁移旧明文 token
+						if (config.token) {
+							return setToken(key, token);
+						}
+						return null;
+					});
+				});
+			});
+		}
+		unlockPromise.then(function() {
 			hideLockScreen();
 			return onUnlocked();
 		}).then(function() {
@@ -1077,13 +1154,13 @@
 		$('#settingEncrypt').val(config.dataEncrypt === false ? '0' : '1');
 		// Gitee OAuth 应用配置回填
 		var app = giteeOAuthApp();
-		var hasBuiltin = BUILTIN_GITEE_APP && BUILTIN_GITEE_APP.clientId && BUILTIN_GITEE_APP.clientSecret;
+		var hasBuiltin = hasBuiltinApp();
 		$('#oauthClientId').val((!app || app.builtin) ? '' : app.clientId);
 		$('#oauthClientSecret').val('');
 		if (config.giteeTokens) {
 			$('#oauthStatus').text('已通过 OAuth 登录（Token 自动刷新）');
 		} else if (hasBuiltin) {
-			$('#oauthStatus').text('网站已内置应用凭据，直接点「使用 Gitee 登录」即可，无需填写下方内容');
+			$('#oauthStatus').text('网站已内置加密的应用凭据（解锁时自动解密），直接点「使用 Gitee 登录」即可');
 		} else if (app) {
 			$('#oauthStatus').text('应用已配置，点击下方按钮登录');
 		} else {
@@ -1270,11 +1347,12 @@
 			scheduleSave();
 		});
 
-		if (!hasLock()) {
+		if (hasBuiltinApp() || hasLock()) {
+			// 内置密文凭据（全局密码）或已有设备密码：直接解锁
+			showLockScreen(false);
+		} else {
 			// 首次使用：设置密码
 			showLockScreen(true);
-		} else {
-			showLockScreen(false);
 		}
 	}
 
