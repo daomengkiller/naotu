@@ -100,21 +100,70 @@
 			z-index: 2000;
 			display: none;
 		}
+		/* 锁屏 */
+		#lockScreen {
+			position: fixed;
+			top: 0; left: 0; right: 0; bottom: 0;
+			background: #2C3344;
+			z-index: 3000;
+			display: none;
+		}
+		#lockScreen .lock-box {
+			position: absolute;
+			top: 50%; left: 50%;
+			transform: translate(-50%, -60%);
+			width: 380px;
+			background: #fff;
+			border-radius: 8px;
+			padding: 32px 36px;
+			box-shadow: 0 12px 40px rgba(0,0,0,.35);
+		}
+		#lockScreen .lock-icon {
+			width: 52px; height: 52px;
+			line-height: 52px;
+			text-align: center;
+			background: #4A90E2;
+			color: #fff;
+			font-size: 24px;
+			border-radius: 50%;
+			margin: 0 auto 16px;
+		}
+		#lockScreen h3 { margin: 0 0 6px; font-size: 17px; text-align: center; }
+		#lockScreen .lock-sub { font-size: 12px; color: #999; text-align: center; margin-bottom: 18px; line-height: 1.6; }
+		#lockScreen .form-control { margin-bottom: 10px; height: 38px; }
+		#lockScreen .lock-hint { font-size: 12px; color: #EB5757; min-height: 16px; margin-bottom: 8px; }
+		#lockScreen .btn { width: 100%; }
 	</style>
 </head>
 <body ng-app="kityminderDemo" ng-controller="MainController">
+<!-- 锁屏层 -->
+<div id="lockScreen">
+	<div class="lock-box">
+		<div class="lock-icon"><span class="glyphicon glyphicon-lock"></span></div>
+		<h3 id="lockTitle">输入访问密码</h3>
+		<div class="lock-sub" id="lockSub"></div>
+		<input type="password" class="form-control" id="lockPw1" placeholder="密码">
+		<input type="password" class="form-control" id="lockPw2" placeholder="再次输入密码" style="display:none;">
+		<div class="lock-hint" id="lockHint"></div>
+		<button class="btn btn-primary" id="lockBtn">解锁</button>
+	</div>
+</div>
+
+<div id="editorArea">
 <h1 class="editor-title">
 	<span class="title-brand"><span class="km-badge">脑图</span>我的脑图</span>
 	<span class="cloud-bar">
 		<span class="cloud-status" id="cloudStatus">未连接云端</span>
 		<span class="file-name" id="currentFileName"></span>
 		<button class="btn btn-default btn-sm" id="btnNew">新建</button>
-		<button class="btn btn-default btn-sm" id="btnOpen">打开云端</button>
+		<button class="btn btn-default btn-sm" id="btnOpen">打开脑图</button>
 		<button class="btn btn-primary btn-sm" id="btnSave">保存</button>
+		<button class="btn btn-default btn-sm" id="btnChangePw">改密码</button>
 		<button class="btn btn-default btn-sm" id="btnSettings">设置</button>
 	</span>
 </h1>
 <kityminder-editor on-init="initEditor(editor, minder)"></kityminder-editor>
+</div>
 
 <div class="toast-msg" id="toastMsg"></div>
 
@@ -130,7 +179,7 @@
 				<div class="form-group">
 					<label>GitHub Token（个人访问令牌）</label>
 					<input type="password" class="form-control" id="settingToken" placeholder="ghp_xxx 或 github_pat_xxx">
-					<div class="help-text">在 GitHub → Settings → Developer settings → Personal access tokens 生成，勾选 repo 权限（Fine-grained 需勾选 Contents 读写）。Token 仅保存在本浏览器 localStorage 中。</div>
+					<div class="help-text">在 GitHub → Settings → Developer settings → Personal access tokens 生成，勾选 repo 权限（Fine-grained 需勾选 Contents 读写）。Token 会用你的访问密码加密后保存在本浏览器，<b>只需填写一次</b>，以后解锁即自动使用。</div>
 				</div>
 				<div class="form-group">
 					<label>仓库名（存脑图数据的私有仓库）</label>
@@ -158,16 +207,16 @@
 	</div>
 </div>
 
-<!-- 打开云端模态框 -->
+<!-- 打开脑图模态框 -->
 <div class="modal fade" id="openModal" tabindex="-1">
 	<div class="modal-dialog">
 		<div class="modal-content">
 			<div class="modal-header">
 				<button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
-				<h4 class="modal-title">打开云端脑图</h4>
+				<h4 class="modal-title">打开脑图（本地 + 云端）</h4>
 			</div>
 			<div class="modal-body">
-				<div class="help-text" id="openHelp">点击文件打开，鼠标悬停可删除。</div>
+				<div class="help-text" id="openHelp">点击文件打开，鼠标悬停可删除。「云端」= 已同步到 GitHub，「本地」= 仅存本浏览器。</div>
 				<ul class="list-group" id="fileList" style="max-height: 380px; overflow-y: auto;"></ul>
 			</div>
 			<div class="modal-footer">
@@ -194,6 +243,38 @@
 			<div class="modal-footer">
 				<button type="button" class="btn btn-default" data-dismiss="modal">取消</button>
 				<button type="button" class="btn btn-primary" id="btnConfirmNew">确定</button>
+			</div>
+		</div>
+	</div>
+</div>
+
+<!-- 修改密码模态框 -->
+<div class="modal fade" id="pwModal" tabindex="-1">
+	<div class="modal-dialog modal-sm">
+		<div class="modal-content">
+			<div class="modal-header">
+				<button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
+				<h4 class="modal-title">修改访问密码</h4>
+			</div>
+			<div class="modal-body">
+				<div class="form-group">
+					<label>旧密码</label>
+					<input type="password" class="form-control" id="oldPw" placeholder="当前密码">
+				</div>
+				<div class="form-group">
+					<label>新密码</label>
+					<input type="password" class="form-control" id="newPw" placeholder="至少 4 位">
+				</div>
+				<div class="form-group">
+					<label>确认新密码</label>
+					<input type="password" class="form-control" id="newPw2" placeholder="再次输入新密码">
+				</div>
+				<div class="help-text" id="pwHint" style="color:#EB5757; min-height:16px;"></div>
+				<div class="help-text">修改密码会用新密码重新加密已保存的 GitHub Token，不影响云端数据。</div>
+			</div>
+			<div class="modal-footer">
+				<button type="button" class="btn btn-default" data-dismiss="modal">取消</button>
+				<button type="button" class="btn btn-primary" id="btnConfirmPw">确认修改</button>
 			</div>
 		</div>
 	</div>
