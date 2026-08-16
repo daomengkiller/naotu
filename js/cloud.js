@@ -23,7 +23,7 @@
 	var LOCAL_PREFIX = 'km_local_';        // localStorage 前缀：km_local_<name> = {json, updatedAt}
 
 	var DEFAULT_DIR = 'mindmaps';
-	var SAVE_DEBOUNCE_MS = 1500;
+	var SAVE_DEBOUNCE_MS = 5000; // 编辑后 5 秒无操作自动保存
 	var VERIFY_TEXT = 'km-lock-verify';
 	var PBKDF2_ITERATIONS = 150000;
 	// 数据加密：固定盐保证相同密码在任何设备派生相同数据密钥（跨设备可解密）
@@ -863,7 +863,7 @@
 		if (!currentFile) return;
 		dirty = true;
 		clearTimeout(saveTimer);
-		setStatus('有修改，待保存…', 'syncing');
+		setStatus('有修改，5 秒后自动保存…', 'syncing');
 		saveTimer = setTimeout(function() {
 			if (!saving) doSave().catch(function() {});
 		}, SAVE_DEBOUNCE_MS);
@@ -1382,6 +1382,20 @@
 		});
 		$('#lockPw2').on('keydown', function(e) {
 			if (e.keyCode === 13) handleLockSubmit();
+		});
+		// Ctrl+S / Cmd+S 手动保存
+		$(window.document).on('keydown', function(e) {
+			if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.keyCode === 83)) {
+				e.preventDefault();
+				if (!unlocked) return;
+				if (!currentFile) {
+					promptNewFile();
+					return;
+				}
+				clearTimeout(saveTimer);
+				toast('正在保存…');
+				doSave().catch(function() {});
+			}
 		});
 		// 定时记录当前文件，供下次打开恢复
 		setInterval(function() {
