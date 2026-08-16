@@ -260,14 +260,26 @@
 		return list;
 	}
 
-	/* ---------------- GitHub API ---------------- */
+	/* ---------------- 云端 API（GitHub / Gitee 双后端） ---------------- */
+
+	function currentBackend() {
+		return config.backend === 'gitee' ? 'gitee' : 'github';
+	}
+
+	function backendName() {
+		return currentBackend() === 'gitee' ? 'Gitee' : 'GitHub';
+	}
 
 	function ghHeaders() {
-		return {
-			'Authorization': 'token ' + (config._token || ''),
-			'Accept': 'application/vnd.github.v3+json',
+		var h = {
+			'Accept': 'application/json',
 			'User-Agent': 'km-cloud-sync'
 		};
+		if (currentBackend() === 'github') {
+			h['Authorization'] = 'token ' + (config._token || '');
+			h['Accept'] = 'application/vnd.github.v3+json';
+		}
+		return h;
 	}
 
 	function ghRequest(method, url, body) {
@@ -275,13 +287,17 @@
 			method: method,
 			headers: ghHeaders()
 		};
+		// Gitee 的 access_token 放在 URL query 中
+		if (currentBackend() === 'gitee' && config._token) {
+			url += (url.indexOf('?') > -1 ? '&' : '?') + 'access_token=' + encodeURIComponent(config._token);
+		}
 		if (body !== undefined) {
 			opts.headers['Content-Type'] = 'application/json';
 			opts.body = JSON.stringify(body);
 		}
 		return fetch(url, opts).then(function(res) {
 			if (res.status === 401 || res.status === 403) {
-				throw new Error('认证失败：Token 无效或权限不足（HTTP ' + res.status + '）');
+				throw new Error('认证失败：' + backendName() + ' Token 无效或权限不足（HTTP ' + res.status + '）');
 			}
 			if (res.status === 404) {
 				throw new Error('未找到仓库/文件（HTTP 404）');
@@ -300,7 +316,9 @@
 	}
 
 	function apiBase() {
-		return 'https://api.github.com';
+		return currentBackend() === 'gitee'
+			? 'https://gitee.com/api/v5'
+			: 'https://api.github.com';
 	}
 
 	function dirPath() {
@@ -309,6 +327,11 @@
 
 	function repoPath(path) {
 		return apiBase() + '/repos/' + config.repo + '/contents/' + encodeURIComponent(path);
+	}
+
+	function cleanBase64(b64) {
+		// Gitee 返回的 content 可能带换行/空格
+		return String(b64).replace(/\s+/g, '');
 	}
 
 	function cloudListFiles() {
@@ -331,7 +354,7 @@
 					.sort(function(a, b) { return a.name.localeCompare(b.name, 'zh'); });
 			})
 			.catch(function(err) {
-				// GitHub 不保留空目录：404 视为空列表
+				// 云端不保留空目录：404 视为空列表
 				if (err && err.message && err.message.indexOf('HTTP 404') > -1) return [];
 				throw err;
 			});
@@ -341,8 +364,15 @@
 		var dir = dirPath();
 		var path = dir ? dir + '/' + fileName + '.km' : fileName + '.km';
 		return ghRequest('GET', repoPath(path)).then(function(data) {
+			var content = data.content;
+			// Gitee 大文件可能走 download_url，content 为空时降级
+			if (!content && data.download_url && currentBackend() === 'gitee') {
+				return fetch(data.download_url).then(function(r) { return r.text(); }).then(function(text) {
+					return { json: text, sha: data.sha };
+				});
+			}
 			return {
-				json: base64ToUtf8(data.content),
+				json: base64ToUtf8(cleanBase64(content)),
 				sha: data.sha
 			};
 		});
@@ -356,8 +386,12 @@
 			content: utf8ToBase64(json)
 		};
 		if (sha) body.sha = sha;
-		return ghRequest('PUT', repoPath(path), body).then(function(data) {
-			return data && data.content ? data.content.sha : null;
+		// Gitee 创建文件用 POST，更新用 PUT；GitHub 都用 PUT
+		var method = currentBackend() === 'gitee' ? (sha ? 'PUT' : 'POST') : 'PUT';
+		return ghRequest(method, repoPath(path), body).then(function(data) {
+			if (!data) return null;
+			// GitHub: data.content.sha；Gitee: data.content.sha 或 data.sha
+			return (data.content && data.content.sha) || data.sha || null;
 		});
 	}
 
@@ -701,7 +735,7 @@
 		if (!config.token && !config.tokenEnc && !config.repo) {
 			setStatus('未配置云端（点"设置"开始）', 'error');
 		} else if (hasCloudConfig()) {
-			setStatus('已配置云端', 'online');
+			setStatus('已配置云端（' + backendName() + '）', 'online');
 		} else {
 			setStatus('本地模式（未配置云端）', 'online');
 		}
@@ -726,11 +760,27 @@
 
 	function openSettingsModal() {
 		$('#settingToken').val('');
-		$('#settingToken').attr('placeholder', hasCloudConfig() ? '已加密保存（留空保持不变，输入新值可替换）' : 'ghp_xxx 或 github_pat_xxx');
+		var ph = hasCloudConfig()
+			? '已加密保存（留空保持不变，输入新值可替换）'
+			: (currentBackend() === 'gitee' ? 'Gitee 私人令牌，如 xxxxxxxxxxxx' : 'ghp_xxx 或 github_pat_xxx');
+		$('#settingToken').attr('placeholder', ph);
+		$('#settingBackend').val(config.backend === 'gitee' ? 'gitee' : 'github');
 		$('#settingRepo').val(config.repo || '');
 		$('#settingDir').val(config.dir || DEFAULT_DIR);
 		$('#settingAutoSave').val(config.autoSave === undefined ? '1' : (config.autoSave ? '1' : '0'));
+		updateBackendHint();
 		$('#settingsModal').modal('show');
+	}
+
+	function updateBackendHint() {
+		var be = $('#settingBackend').val();
+		if (be === 'gitee') {
+			$('#backendHint').text('Gitee（码云）：国内访问快。在 gitee.com 右上角头像 → 设置 → 私人令牌 生成（勾选 projects 权限），仓库填 用户名/仓库名，如 myname/naotu-data');
+		} else if (be === 'local') {
+			$('#backendHint').text('本地模式：不连云端，脑图仅保存在本浏览器，适合离线/临时使用');
+		} else {
+			$('#backendHint').text('GitHub：在 GitHub → Settings → Developer settings → Personal access tokens 生成，勾选 repo 权限；仓库填 用户名/仓库名');
+		}
 	}
 
 	function saveSettings() {
@@ -738,6 +788,7 @@
 		var repo = $('#settingRepo').val().trim();
 		var dir = $('#settingDir').val().trim() || DEFAULT_DIR;
 		var autoSave = $('#settingAutoSave').val() === '1';
+		var backend = $('#settingBackend').val();
 
 		var p;
 		if (token) {
@@ -752,14 +803,15 @@
 			config.repo = repo;
 			config.dir = dir;
 			config.autoSave = autoSave;
+			config.backend = backend;
 			saveConfig();
 			$('#settingsModal').modal('hide');
-			if (hasCloudConfig()) {
-				setStatus('已配置云端', 'online');
-				toast('设置已保存（Token 已加密存储）');
-			} else {
+			if (backend === 'local' || !hasCloudConfig()) {
 				setStatus('本地模式', 'online');
-				toast('已保存为本地模式（未填 Token/仓库）');
+				toast('已保存为本地模式（未配置云端）');
+			} else {
+				setStatus('已配置云端（' + backendName() + '）', 'online');
+				toast('设置已保存（Token 已加密存储）');
 			}
 		});
 	}
@@ -817,6 +869,7 @@
 		});
 		$('#btnChangePw').on('click', promptChangePassword);
 		$('#btnConfirmPw').on('click', confirmChangePassword);
+		$('#settingBackend').on('change', updateBackendHint);
 		$('#lockBtn').on('click', handleLockSubmit);
 		$('#lockPw1').on('keydown', function(e) {
 			if (e.keyCode === 13) {

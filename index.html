@@ -173,18 +173,27 @@
 		<div class="modal-content">
 			<div class="modal-header">
 				<button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
-				<h4 class="modal-title">云端设置（GitHub 私有仓库）</h4>
+				<h4 class="modal-title">云端设置（GitHub / Gitee）</h4>
 			</div>
 			<div class="modal-body">
 				<div class="form-group">
-					<label>GitHub Token（个人访问令牌）</label>
+					<label>存储后端</label>
+					<select class="form-control" id="settingBackend">
+						<option value="github">GitHub（国际通用）</option>
+						<option value="gitee">Gitee 码云（国内访问快，推荐）</option>
+						<option value="local">仅本地（不连云端）</option>
+					</select>
+					<div class="help-text" id="backendHint"></div>
+				</div>
+				<div class="form-group">
+					<label id="tokenLabel">Token（个人访问令牌）</label>
 					<input type="password" class="form-control" id="settingToken" placeholder="ghp_xxx 或 github_pat_xxx">
-					<div class="help-text">在 GitHub → Settings → Developer settings → Personal access tokens 生成，勾选 repo 权限（Fine-grained 需勾选 Contents 读写）。Token 会用你的访问密码加密后保存在本浏览器，<b>只需填写一次</b>，以后解锁即自动使用。</div>
+					<div class="help-text">Token 会用你的访问密码加密后保存在本浏览器，<b>只需填写一次</b>，以后解锁即自动使用。</div>
 				</div>
 				<div class="form-group">
 					<label>仓库名（存脑图数据的私有仓库）</label>
-					<input type="text" class="form-control" id="settingRepo" placeholder="用户名/仓库名，如 myname/mindmap-data">
-					<div class="help-text">可以是一个专门存放数据的 <b>私有仓库</b>（新建时不要勾选 README，或已有空仓库均可）。脑图文件会保存在该仓库 mindmaps/ 目录下。</div>
+					<input type="text" class="form-control" id="settingRepo" placeholder="用户名/仓库名，如 myname/naotu-data">
+					<div class="help-text">一个专门存放数据的<b>私有仓库</b>。脑图文件会保存在该仓库 mindmaps/ 目录下（自动创建）。</div>
 				</div>
 				<div class="form-group">
 					<label>云端目录（可选）</label>
@@ -216,7 +225,7 @@
 				<h4 class="modal-title">打开脑图（本地 + 云端）</h4>
 			</div>
 			<div class="modal-body">
-				<div class="help-text" id="openHelp">点击文件打开，鼠标悬停可删除。「云端」= 已同步到 GitHub，「本地」= 仅存本浏览器。</div>
+				<div class="help-text" id="openHelp">点击文件打开，鼠标悬停可删除。「云端」= 已同步到 GitHub/Gitee，「本地」= 仅存本浏览器。</div>
 				<ul class="list-group" id="fileList" style="max-height: 380px; overflow-y: auto;"></ul>
 			</div>
 			<div class="modal-footer">
