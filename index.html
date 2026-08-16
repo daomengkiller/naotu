@@ -207,6 +207,25 @@
 						<option value="0">关闭（仅手动点保存）</option>
 					</select>
 				</div>
+				<div id="oauthSection" style="display:none;">
+					<hr>
+					<h5 style="margin-top:0;"><b>Gitee 一键登录</b>（免输 Token）</h5>
+					<div class="help-text" style="margin-bottom:10px;">在 Gitee 创建 OAuth 应用后，这里只需配置一次，以后点「使用 Gitee 登录」授权即可自动连接，Token 自动刷新，不再需要复制粘贴。</div>
+					<div class="form-group">
+						<label>Client ID（应用 ID）</label>
+						<input type="text" class="form-control" id="oauthClientId" placeholder="Gitee 应用的 Client ID">
+					</div>
+					<div class="form-group">
+						<label>Client Secret（应用密钥）</label>
+						<input type="password" class="form-control" id="oauthClientSecret" placeholder="Gitee 应用的 Client Secret">
+						<div class="help-text">加密保存在本浏览器。创建步骤：Gitee → 右上角头像 → 设置 → 安全设置 → 第三方应用 → 创建应用；回调地址填 <b>本页面网址</b>（当前为 https://daomengkiller.github.io/naotu/ 或你的本地地址），权限勾选 projects、user_info。</div>
+					</div>
+					<div class="form-group">
+						<button type="button" class="btn btn-default btn-sm" id="btnSaveOAuth">保存应用信息</button>
+						<button type="button" class="btn btn-success btn-sm" id="btnGiteeLogin">使用 Gitee 登录</button>
+						<span class="help-text" id="oauthStatus" style="margin-left:8px;"></span>
+					</div>
+				</div>
 			</div>
 			<div class="modal-footer">
 				<button type="button" class="btn btn-default" data-dismiss="modal">取消</button>

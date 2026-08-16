@@ -38,6 +38,8 @@
 	var dirty = false;
 	var unlocked = false;
 	var unlockKey = null;        // CryptoKey，由密码派生
+	var pendingOAuth = null;     // { code, state } 待处理的 Gitee OAuth 回调
+	var oauthRefreshing = false; // 防止并发刷新 token
 
 	/* ---------------- 工具函数 ---------------- */
 
@@ -260,6 +262,185 @@
 		return list;
 	}
 
+	/* ---------------- Gitee OAuth 登录 ---------------- */
+
+	/**
+	 * 使用 Gitee OAuth 授权码模式（纯前端）：
+	 * 1. 用户在 Gitee 创建第三方应用，获得 client_id / client_secret（设置里填一次，加密保存）
+	 * 2. 点击「使用 Gitee 登录」→ 跳转 Gitee 授权页
+	 * 3. 授权后回跳到本页 ?code=xxx&state=yyy
+	 * 4. 前端用 code + client_secret 换取 access_token（含 refresh_token）
+	 * 5. access_token 加密保存，过期后自动用 refresh_token 刷新，无需再手动输入
+	 */
+
+	function giteeOAuthApp() {
+		return config.giteeApp || null;
+	}
+
+	function getRedirectUri() {
+		// 回调地址 = 当前页面地址（去掉 query/hash），如 https://xxx.github.io/naotu/
+		return window.location.origin + window.location.pathname;
+	}
+
+	function startGiteeLogin() {
+		var app = giteeOAuthApp();
+		if (!app || !app.clientId || !app.clientSecretEnc) {
+			toast('请先在设置中填写 Gitee 应用的 Client ID 和 Client Secret');
+			return;
+		}
+		if (!unlockKey) {
+			toast('请先解锁页面');
+			return;
+		}
+		// 解密 client_secret
+		aesDecrypt(unlockKey, app.clientSecretEnc.iv, app.clientSecretEnc.data).then(function(secret) {
+			var state = Math.random().toString(36).slice(2) + Date.now().toString(36);
+			window.sessionStorage.setItem('km_gitee_oauth_state', state);
+			var params = [
+				'client_id=' + encodeURIComponent(app.clientId),
+				'redirect_uri=' + encodeURIComponent(getRedirectUri()),
+				'response_type=code',
+				'scope=projects%20user_info',
+				'state=' + encodeURIComponent(state)
+			];
+			window.location.href = 'https://gitee.com/oauth/authorize?' + params.join('&');
+		}).catch(function() {
+			toast('解密失败，请重新填写 Client Secret');
+		});
+	}
+
+	function parseOAuthCallback() {
+		// 从 URL query 解析 code/state（OAuth 回调）
+		var qs = window.location.search.substring(1);
+		if (!qs) return;
+		var params = {};
+		qs.split('&').forEach(function(pair) {
+			var kv = pair.split('=');
+			params[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1] || '');
+		});
+		if (params.code) {
+			pendingOAuth = { code: params.code, state: params.state || '' };
+		}
+	}
+
+	function processOAuthCallback() {
+		if (!pendingOAuth) return Promise.resolve(false);
+		var savedState = window.sessionStorage.getItem('km_gitee_oauth_state');
+		window.sessionStorage.removeItem('km_gitee_oauth_state');
+		if (savedState && pendingOAuth.state !== savedState) {
+			toast('Gitee 登录失败：state 校验不通过（可能被篡改）');
+			pendingOAuth = null;
+			return Promise.resolve(false);
+		}
+		var app = giteeOAuthApp();
+		if (!app || !app.clientId || !app.clientSecretEnc) {
+			toast('请先在设置中填写 Gitee 应用信息后重试登录');
+			pendingOAuth = null;
+			return Promise.resolve(false);
+		}
+		var code = pendingOAuth.code;
+		pendingOAuth = null;
+		return aesDecrypt(unlockKey, app.clientSecretEnc.iv, app.clientSecretEnc.data).then(function(secret) {
+			var body = 'grant_type=authorization_code' +
+				'&code=' + encodeURIComponent(code) +
+				'&client_id=' + encodeURIComponent(app.clientId) +
+				'&client_secret=' + encodeURIComponent(secret) +
+				'&redirect_uri=' + encodeURIComponent(getRedirectUri());
+			return fetch('https://gitee.com/oauth/token', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+				body: body
+			}).then(function(res) {
+				return res.json().then(function(j) {
+					if (!res.ok || !j.access_token) {
+						throw new Error(j.error_description || j.error || ('HTTP ' + res.status));
+					}
+					return j;
+				});
+			});
+		}).then(function(tokens) {
+			// 加密保存 access_token / refresh_token
+			return aesEncrypt(unlockKey, tokens.access_token).then(function(encAT) {
+				return aesEncrypt(unlockKey, tokens.refresh_token || '').then(function(encRT) {
+					config.giteeTokens = {
+						accessTokenEnc: encAT,
+						refreshTokenEnc: encRT,
+						expiresAt: Date.now() + (tokens.expires_in || 86400) * 1000
+					};
+					config.backend = 'gitee';
+					saveConfig();
+					config._token = tokens.access_token;
+					setStatus('Gitee 已登录', 'online');
+					toast('Gitee 登录成功！');
+					return true;
+				});
+			});
+		}).catch(function(err) {
+			setStatus('Gitee 登录失败', 'error');
+			toast('Gitee 登录失败：' + err.message);
+			return false;
+		});
+	}
+
+	function refreshGiteeToken() {
+		if (oauthRefreshing) return Promise.resolve(config._token || null);
+		var tokens = config.giteeTokens;
+		if (!tokens || !tokens.refreshTokenEnc || !tokens.refreshTokenEnc.data) return Promise.resolve(null);
+		oauthRefreshing = true;
+		return aesDecrypt(unlockKey, tokens.refreshTokenEnc.iv, tokens.refreshTokenEnc.data).then(function(refreshToken) {
+			if (!refreshToken) return null;
+			return fetch('https://gitee.com/oauth/token', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+				body: 'grant_type=refresh_token&refresh_token=' + encodeURIComponent(refreshToken)
+			}).then(function(res) {
+				return res.json().then(function(j) {
+					if (!res.ok || !j.access_token) {
+						throw new Error(j.error_description || j.error || ('HTTP ' + res.status));
+					}
+					return j;
+				});
+			}).then(function(tokens2) {
+				return aesEncrypt(unlockKey, tokens2.access_token).then(function(encAT) {
+					return aesEncrypt(unlockKey, tokens2.refresh_token || refreshToken).then(function(encRT) {
+						config.giteeTokens = {
+							accessTokenEnc: encAT,
+							refreshTokenEnc: encRT,
+							expiresAt: Date.now() + (tokens2.expires_in || 86400) * 1000
+						};
+						saveConfig();
+						config._token = tokens2.access_token;
+						return config._token;
+					});
+				});
+			});
+		}).catch(function() {
+			// refresh 失败：token 可能彻底失效，下次用 OAuth 重新登录
+			return null;
+		}).then(function(result) {
+			oauthRefreshing = false;
+			return result;
+		});
+	}
+
+	function ensureGiteeToken() {
+		// 保证 config._token 是有效的 Gitee access_token（必要时刷新）
+		if (currentBackend() !== 'gitee') return Promise.resolve(config._token || null);
+		if (!config.giteeTokens) return Promise.resolve(config._token || null);
+		if (config._token && config.giteeTokens.expiresAt && Date.now() < config.giteeTokens.expiresAt - 60000) {
+			return Promise.resolve(config._token);
+		}
+		// 过期或接近过期：解密当前 token 或刷新
+		if (!config._token) {
+			return aesDecrypt(unlockKey, config.giteeTokens.accessTokenEnc.iv, config.giteeTokens.accessTokenEnc.data)
+				.then(function(t) {
+					config._token = t;
+					return t;
+				}).catch(function() { return null; });
+		}
+		return refreshGiteeToken();
+	}
+
 	/* ---------------- 云端 API（GitHub / Gitee 双后端） ---------------- */
 
 	function currentBackend() {
@@ -283,35 +464,42 @@
 	}
 
 	function ghRequest(method, url, body) {
-		var opts = {
-			method: method,
-			headers: ghHeaders()
-		};
-		// Gitee 的 access_token 放在 URL query 中
-		if (currentBackend() === 'gitee' && config._token) {
-			url += (url.indexOf('?') > -1 ? '&' : '?') + 'access_token=' + encodeURIComponent(config._token);
-		}
-		if (body !== undefined) {
-			opts.headers['Content-Type'] = 'application/json';
-			opts.body = JSON.stringify(body);
-		}
-		return fetch(url, opts).then(function(res) {
-			if (res.status === 401 || res.status === 403) {
-				throw new Error('认证失败：' + backendName() + ' Token 无效或权限不足（HTTP ' + res.status + '）');
+		// Gitee：先确保 access_token 有效（必要时自动刷新）
+		var prepare = currentBackend() === 'gitee'
+			? ensureGiteeToken()
+			: Promise.resolve(config._token || null);
+
+		return prepare.then(function() {
+			var opts = {
+				method: method,
+				headers: ghHeaders()
+			};
+			// Gitee 的 access_token 放在 URL query 中
+			if (currentBackend() === 'gitee' && config._token) {
+				url += (url.indexOf('?') > -1 ? '&' : '?') + 'access_token=' + encodeURIComponent(config._token);
 			}
-			if (res.status === 404) {
-				throw new Error('未找到仓库/文件（HTTP 404）');
+			if (body !== undefined) {
+				opts.headers['Content-Type'] = 'application/json';
+				opts.body = JSON.stringify(body);
 			}
-			if (!res.ok) {
-				return res.json().then(function(j) {
-					throw new Error((j.message || '请求失败') + '（HTTP ' + res.status + '）');
-				}).catch(function(e) {
-					if (e instanceof Error && e.message.indexOf('HTTP') > -1) throw e;
-					throw new Error('请求失败（HTTP ' + res.status + '）');
-				});
-			}
-			if (res.status === 204) return null;
-			return res.json();
+			return fetch(url, opts).then(function(res) {
+				if (res.status === 401 || res.status === 403) {
+					throw new Error('认证失败：' + backendName() + ' Token 无效或权限不足（HTTP ' + res.status + '）');
+				}
+				if (res.status === 404) {
+					throw new Error('未找到仓库/文件（HTTP 404）');
+				}
+				if (!res.ok) {
+					return res.json().then(function(j) {
+						throw new Error((j.message || '请求失败') + '（HTTP ' + res.status + '）');
+					}).catch(function(e) {
+						if (e instanceof Error && e.message.indexOf('HTTP') > -1) throw e;
+						throw new Error('请求失败（HTTP ' + res.status + '）');
+					});
+				}
+				if (res.status === 204) return null;
+				return res.json();
+			});
 		});
 	}
 
@@ -698,7 +886,12 @@
 				return null;
 			}).then(function() {
 				hideLockScreen();
-				onUnlocked();
+				return onUnlocked();
+			}).then(function() {
+				if (pendingOAuth) {
+					return processOAuthCallback();
+				}
+				return null;
 			}).catch(function(err) {
 				$('#lockHint').text('设置失败：' + err.message).css('color', '#EB5757');
 			});
@@ -723,7 +916,13 @@
 			});
 		}).then(function() {
 			hideLockScreen();
-			onUnlocked();
+			return onUnlocked();
+		}).then(function() {
+			// OAuth 回调处理（可能从 Gitee 授权页跳回）
+			if (pendingOAuth) {
+				return processOAuthCallback();
+			}
+			return null;
 		}).catch(function(err) {
 			$('#lockHint').text('解锁失败：' + err.message).css('color', '#EB5757');
 		});
@@ -732,7 +931,18 @@
 	/* ---------------- 解锁后的初始化 ---------------- */
 
 	function onUnlocked() {
-		if (!config.token && !config.tokenEnc && !config.repo) {
+		var p = Promise.resolve();
+		if (currentBackend() === 'gitee' && config.giteeTokens) {
+			// Gitee OAuth：恢复/刷新 token
+			p = ensureGiteeToken().then(function(t) {
+				if (t) {
+					setStatus('Gitee 已登录', 'online');
+				} else {
+					setStatus('Gitee 登录已过期（设置中重新登录）', 'error');
+				}
+				return null;
+			});
+		} else if (!config.token && !config.tokenEnc && !config.repo) {
 			setStatus('未配置云端（点"设置"开始）', 'error');
 		} else if (hasCloudConfig()) {
 			setStatus('已配置云端（' + backendName() + '）', 'online');
@@ -750,10 +960,13 @@
 			if (rec) {
 				try {
 					importJson(rec.json);
-					setStatus('已打开 ' + lastFile.name + '（本地）', 'online');
+					if (currentBackend() !== 'gitee') {
+						setStatus('已打开 ' + lastFile.name + '（本地）', 'online');
+					}
 				} catch (e) {}
 			}
 		}
+		return p;
 	}
 
 	/* ---------------- 设置面板 ---------------- */
@@ -768,19 +981,48 @@
 		$('#settingRepo').val(config.repo || '');
 		$('#settingDir').val(config.dir || DEFAULT_DIR);
 		$('#settingAutoSave').val(config.autoSave === undefined ? '1' : (config.autoSave ? '1' : '0'));
+		// Gitee OAuth 应用配置回填
+		var app = giteeOAuthApp();
+		$('#oauthClientId').val(app ? app.clientId : '');
+		$('#oauthClientSecret').val('');
+		$('#oauthStatus').text(app ? (config.giteeTokens ? '已通过 OAuth 登录（Token 自动刷新）' : '应用已配置，点击下方按钮登录') : '未配置');
 		updateBackendHint();
+		updateOAuthSection();
 		$('#settingsModal').modal('show');
 	}
 
 	function updateBackendHint() {
 		var be = $('#settingBackend').val();
 		if (be === 'gitee') {
-			$('#backendHint').text('Gitee（码云）：国内访问快。在 gitee.com 右上角头像 → 设置 → 私人令牌 生成（勾选 projects 权限），仓库填 用户名/仓库名，如 myname/naotu-data');
+			$('#backendHint').text('Gitee（码云）：国内访问快。推荐用「Gitee 一键登录」（下方），也可用私人令牌：头像 → 设置 → 私人令牌（勾选 projects 权限），仓库填 用户名/仓库名');
 		} else if (be === 'local') {
 			$('#backendHint').text('本地模式：不连云端，脑图仅保存在本浏览器，适合离线/临时使用');
 		} else {
 			$('#backendHint').text('GitHub：在 GitHub → Settings → Developer settings → Personal access tokens 生成，勾选 repo 权限；仓库填 用户名/仓库名');
 		}
+		updateOAuthSection();
+	}
+
+	function updateOAuthSection() {
+		// 只有 Gitee 后端显示 OAuth 区
+		var show = $('#settingBackend').val() === 'gitee';
+		$('#oauthSection').toggle(show);
+	}
+
+	function saveOAuthApp() {
+		var clientId = $('#oauthClientId').val().trim();
+		var clientSecret = $('#oauthClientSecret').val().trim();
+		if (!clientId || !clientSecret) {
+			toast('请填写完整的 Client ID 和 Client Secret');
+			return;
+		}
+		aesEncrypt(unlockKey, clientSecret).then(function(enc) {
+			config.giteeApp = { clientId: clientId, clientSecretEnc: enc };
+			config.backend = 'gitee';
+			saveConfig();
+			$('#oauthStatus').text('应用已配置，点击下方按钮登录');
+			toast('Gitee 应用信息已保存（加密存储）');
+		});
 	}
 
 	function saveSettings() {
@@ -870,6 +1112,8 @@
 		$('#btnChangePw').on('click', promptChangePassword);
 		$('#btnConfirmPw').on('click', confirmChangePassword);
 		$('#settingBackend').on('change', updateBackendHint);
+		$('#btnSaveOAuth').on('click', saveOAuthApp);
+		$('#btnGiteeLogin').on('click', startGiteeLogin);
 		$('#lockBtn').on('click', handleLockSubmit);
 		$('#lockPw1').on('keydown', function(e) {
 			if (e.keyCode === 13) {
@@ -898,6 +1142,8 @@
 		minder = minderInstance;
 		loadConfig();
 		initUi();
+		// 解析可能的 Gitee OAuth 回调（?code=xxx&state=yyy）
+		parseOAuthCallback();
 
 		// 编辑器监听（在锁屏下也监听，但保存逻辑会检查解锁状态）
 		minder.on('contentchange', function() {
