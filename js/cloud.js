@@ -314,11 +314,12 @@
 
 	/* ---------------- 本地存储 ---------------- */
 
-	function localSave(name, json) {
+	function localSave(name, json, sha) {
 		try {
 			window.localStorage.setItem(LOCAL_PREFIX + name, JSON.stringify({
 				json: json,
-				updatedAt: new Date().toISOString()
+				updatedAt: new Date().toISOString(),
+				sha: sha || null
 			}));
 			return true;
 		} catch (e) {
@@ -652,6 +653,19 @@
 				if (res.status === 404) {
 					throw new Error('未找到仓库/文件（HTTP 404）');
 				}
+				// 冲突：云端文件已被其他设备修改（sha 不匹配）或同名文件已存在
+				if (res.status === 409 || res.status === 422) {
+					return res.json().then(function(j) {
+						var err = new Error('CONFLICT:' + (j.message || '云端文件已被其他设备修改'));
+						err.conflict = true;
+						throw err;
+					}).catch(function(e) {
+						if (e instanceof Error && e.conflict) throw e;
+						var err2 = new Error('CONFLICT:云端文件已被其他设备修改');
+						err2.conflict = true;
+						throw err2;
+					});
+				}
 				if (!res.ok) {
 					return res.json().then(function(j) {
 						throw new Error((j.message || '请求失败') + '（HTTP ' + res.status + '）');
@@ -837,7 +851,11 @@
 			setStatus('保存中…', 'syncing');
 			return cloudWriteFile(currentFile.name, json, currentFile.sha)
 				.then(function(sha) {
-					if (sha) currentFile.sha = sha;
+					if (sha) {
+						currentFile.sha = sha;
+						// 更新本地缓存 sha（保证下次打开能正确检测冲突）
+						localSave(currentFile.name, json, sha);
+					}
 					currentFile.source = 'cloud';
 					dirty = false;
 					saving = false;
@@ -846,6 +864,19 @@
 				})
 				.catch(function(err) {
 					saving = false;
+					if (err && err.conflict) {
+						// 冲突：云端已被其他设备修改 -> 交给冲突处理
+						return handleConflict(json).then(function(resolved) {
+							if (resolved) {
+								dirty = false;
+								var t3 = new Date();
+								setStatus('已处理冲突并保存 ' + t3.getHours() + ':' + ('0' + t3.getMinutes()).slice(-2), 'online');
+							} else {
+								// 用户放弃云端覆盖：本地已备份，保持当前编辑
+								setStatus('冲突未解决（本地已备份）', 'error');
+							}
+						});
+					}
 					setStatus('云端保存失败（已存本地）', 'error');
 					toast('云端保存失败（已保存到本地）：' + err.message);
 					throw err;
@@ -858,6 +889,60 @@
 		setStatus('已保存本地 ' + t2.getHours() + ':' + ('0' + t2.getMinutes()).slice(-2), 'online');
 		toast('已保存到本地（未配置云端）');
 		return Promise.resolve();
+	}
+
+	/**
+	 * 冲突处理：云端文件已被其他设备修改。
+	 * 1) 先把本地当前版本备份为独立文件（不覆盖原文件）
+	 * 2) 让用户选择：覆盖云端 / 加载云端最新
+	 * @returns Promise<boolean> true=已解决（覆盖或加载），false=用户放弃
+	 */
+	function handleConflict(localJson) {
+		if (!currentFile) return Promise.resolve(false);
+		var name = currentFile.name;
+		// 备份本地版本（防止任何一方数据丢失）
+		var backupName = name + '（冲突备份 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }).replace(/:/g, '-') + '）';
+		localSave(backupName, localJson);
+		toast('已自动备份当前版本为「' + backupName + '」', 4000);
+
+		// 询问用户
+		var choice = window.confirm(
+			'⚠️ 云端文件「' + name + '」已被其他设备修改（版本冲突）！\n\n' +
+			'你的当前版本已自动备份为「' + backupName + '」。\n\n' +
+			'点【确定】：用你的当前版本覆盖云端（云端旧版本会被替换）\n' +
+			'点【取消】：加载云端最新版本（你的修改保留在备份里）'
+		);
+
+		if (choice) {
+			// 覆盖云端：需要先取最新 sha，再强制写入
+			setStatus('冲突处理：覆盖云端…', 'syncing');
+			return cloudReadFile(name).then(function(res) {
+				// 用最新 sha 强制覆盖（即使内容不同，只要拿到最新 sha 就能写）
+				return cloudWriteFile(name, localJson, res.sha);
+			}).then(function(sha) {
+				if (sha) currentFile.sha = sha;
+				currentFile.source = 'cloud';
+				toast('已用你的版本覆盖云端');
+				return true;
+			}).catch(function(err2) {
+				toast('覆盖失败：' + err2.message);
+				return false;
+			});
+		} else {
+			// 加载云端最新版本
+			setStatus('冲突处理：加载云端最新…', 'syncing');
+			return cloudReadFile(name).then(function(res) {
+				importJson(res.json);
+				currentFile.sha = res.sha;
+				currentFile.source = 'cloud';
+				localSave(name, res.json, res.sha); // 更新本地为云端版本（记录 sha）
+				toast('已加载云端最新版本（你的修改在备份「' + backupName + '」中）');
+				return true;
+			}).catch(function(err2) {
+				toast('加载云端失败：' + err2.message);
+				return false;
+			});
+		}
 	}
 
 	function scheduleSave() {
@@ -877,14 +962,14 @@
 		setStatus('加载中…', 'syncing');
 		var readPromise = entry.source === 'cloud'
 			? cloudReadFile(entry.name).then(function(res) {
-				// 云端读取后缓存到本地
-				localSave(entry.name, res.json);
+				// 云端读取后缓存到本地（记录 sha 用于后续冲突检测）
+				localSave(entry.name, res.json, res.sha);
 				return res;
 			})
 			: Promise.resolve().then(function() {
 				var rec = localRead(entry.name);
 				if (!rec) throw new Error('本地文件不存在');
-				return { json: rec.json, sha: entry.sha };
+				return { json: rec.json, sha: entry.sha || rec.sha };
 			});
 
 		return readPromise.then(function(res) {
@@ -898,6 +983,32 @@
 		}).catch(function(err) {
 			setStatus('打开失败', 'error');
 			toast('打开失败：' + err.message);
+		});
+	}
+
+	/**
+	 * 打开前检查：本地缓存是否落后于云端（另一终端已保存过）
+	 * 若不一致则提示用户选择用哪个版本
+	 */
+	function checkStaleBeforeOpen(name) {
+		if (!hasCloudConfig()) return Promise.resolve(true);
+		var rec = localRead(name);
+		if (!rec) return Promise.resolve(true); // 本地无缓存，直接打开云端
+		// 本地缓存没有 sha 记录时无法对比 -> 直接打开
+		if (!rec.sha) return Promise.resolve(true);
+		return cloudReadFile(name).then(function(cloud) {
+			if (cloud.sha !== rec.sha) {
+				// 云端比本地新（其他设备保存过）
+				var useCloud = window.confirm(
+					'检测到「' + name + '」云端版本比本地更新（可能在其他设备编辑过）。\n\n' +
+					'点【确定】：打开云端最新版本\n' +
+					'点【取消】：打开本地版本（之后保存会覆盖云端）'
+				);
+				return useCloud;
+			}
+			return true;
+		}).catch(function() {
+			return true; // 读取云端失败时回退本地
 		});
 	}
 
@@ -993,7 +1104,16 @@
 				$li.on('click', function(e) {
 					if ($(e.target).hasClass('del-btn')) return;
 					$('#openModal').modal('hide');
-					openFileEntry(f);
+					// 打开前检查本地缓存是否落后于云端（防双终端冲突）
+					checkStaleBeforeOpen(f.name).then(function(useCloud) {
+						if (useCloud && f.source === 'local' && hasCloudConfig()) {
+							// 用户选择云端版本：以云端为准打开
+							var cloudEntry = { name: f.name, source: 'cloud' };
+							openFileEntry(cloudEntry);
+						} else {
+							openFileEntry(f);
+						}
+					});
 				});
 				$li.find('.del-btn').on('click', function(e) {
 					e.stopPropagation();
