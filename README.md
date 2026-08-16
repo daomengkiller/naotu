@@ -57,6 +57,22 @@
 
 > Gitee 服务器在国内，访问速度远快于 GitHub，国内用户推荐使用。
 
+### Gitee 一键登录（推荐，免输 Token）
+
+设置里选 Gitee 后端后，会出现「Gitee 一键登录」区域，只需配置一次：
+
+1. 打开 https://gitee.com/profile/applications → **创建应用**（第三方应用）
+2. 填写应用信息：
+   - **回调地址**填本页面网址：`https://daomengkiller.github.io/naotu/`
+   - **权限**勾选 `projects` 和 `user_info`
+3. 创建后复制 **Client ID** 和 **Client Secret**，填入网站设置里（加密保存，仅存本浏览器）
+4. 点「保存应用信息」→ 点「**使用 Gitee 登录**」→ 在 Gitee 页面点授权
+5. 自动跳回后即登录成功，**以后无需再输入任何 Token**（过期自动刷新）
+
+> 说明：OAuth 登录的 access_token 有效期 1 天，本工具会用 refresh_token 自动续期；
+> 若长期未使用导致登录失效，重新点一次「使用 Gitee 登录」即可（通常 10 秒内完成）。
+> Client Secret 加密保存在本浏览器，且只用于换取访问令牌，不会上传到任何服务器。
+
 ### 换设备 / 换浏览器
 
 1. 新设备打开网址 → 首次会要求设置密码（新设备的访问密码，可与其他设备不同）
