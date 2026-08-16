@@ -270,6 +270,8 @@
 			config = {};
 		}
 		if (config.dir === undefined) config.dir = DEFAULT_DIR;
+		// 自动保存默认开启（早期配置可能没有该字段）
+		if (config.autoSave === undefined) config.autoSave = true;
 		return config;
 	}
 
@@ -1416,8 +1418,19 @@
 		parseOAuthCallback();
 
 		// 编辑器监听（在锁屏下也监听，但保存逻辑会检查解锁状态）
+		var noFileHintShown = false;
 		minder.on('contentchange', function() {
 			if (!unlocked) return;
+			if (!currentFile) {
+				// 没有打开/新建文件时，编辑不会自动保存——提示一次
+				if (!noFileHintShown) {
+					noFileHintShown = true;
+					setStatus('请先新建或打开脑图再编辑', 'error');
+					toast('当前没有打开的文件，请点右上角「新建」或「打开脑图」', 4000);
+				}
+				return;
+			}
+			noFileHintShown = false;
 			scheduleSave();
 		});
 
