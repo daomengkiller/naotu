@@ -27,6 +27,24 @@
 	var VERIFY_TEXT = 'km-lock-verify';
 	var PBKDF2_ITERATIONS = 150000;
 
+	/* ---------------- 内置 Gitee 应用（免配置） ----------------
+	 *
+	 * 把 Client ID / Client Secret 填在这里并推送到仓库后，
+	 * 任何浏览器打开网站都无需再填应用凭据，只需点「使用 Gitee 登录」授权。
+	 * 这是"只填一次、换浏览器免填"的实现方式（凭据随网站代码分发）。
+	 *
+	 * 说明：
+	 *  - Gitee 强制要求 client_secret（实测无 secret 返回 invalid_client），且不支持 PKCE，
+	 *    纯前端应用要免配置只能把应用凭据内置到代码。
+	 *  - 应用凭据只代表"应用身份"而非"用户身份"，授权仍须你本人在 Gitee 页面确认；
+	 *    若你更在意凭据保密，可留空此项，改为在每台浏览器「设置」里手动填写。
+	 *  - 在 Gitee → 设置 → 安全设置 → 第三方应用 创建应用后，把两个值填到下面。
+	 */
+	var BUILTIN_GITEE_APP = {
+		clientId: '',
+		clientSecret: ''
+	};
+
 	/* ---------------- 状态 ---------------- */
 
 	var config = null;
@@ -274,7 +292,15 @@
 	 */
 
 	function giteeOAuthApp() {
-		return config.giteeApp || null;
+		// 优先：浏览器本地配置的自己的应用（可覆盖内置）
+		if (config.giteeApp && config.giteeApp.clientId && config.giteeApp.clientSecretEnc) {
+			return config.giteeApp;
+		}
+		// 其次：内置应用（换浏览器免配置）
+		if (BUILTIN_GITEE_APP && BUILTIN_GITEE_APP.clientId && BUILTIN_GITEE_APP.clientSecret) {
+			return { clientId: BUILTIN_GITEE_APP.clientId, clientSecretEnc: null, builtin: true };
+		}
+		return null;
 	}
 
 	function getRedirectUri() {
@@ -284,7 +310,7 @@
 
 	function startGiteeLogin() {
 		var app = giteeOAuthApp();
-		if (!app || !app.clientId || !app.clientSecretEnc) {
+		if (!app || !app.clientId) {
 			toast('请先在设置中填写 Gitee 应用的 Client ID 和 Client Secret');
 			return;
 		}
@@ -292,8 +318,11 @@
 			toast('请先解锁页面');
 			return;
 		}
-		// 解密 client_secret
-		aesDecrypt(unlockKey, app.clientSecretEnc.iv, app.clientSecretEnc.data).then(function(secret) {
+		// 解密 client_secret（内置应用直接用明文）
+		var secretPromise = app.builtin
+			? Promise.resolve(BUILTIN_GITEE_APP.clientSecret)
+			: aesDecrypt(unlockKey, app.clientSecretEnc.iv, app.clientSecretEnc.data);
+		secretPromise.then(function(secret) {
 			var state = Math.random().toString(36).slice(2) + Date.now().toString(36);
 			window.sessionStorage.setItem('km_gitee_oauth_state', state);
 			var params = [
@@ -333,14 +362,17 @@
 			return Promise.resolve(false);
 		}
 		var app = giteeOAuthApp();
-		if (!app || !app.clientId || !app.clientSecretEnc) {
+		if (!app || !app.clientId) {
 			toast('请先在设置中填写 Gitee 应用信息后重试登录');
 			pendingOAuth = null;
 			return Promise.resolve(false);
 		}
 		var code = pendingOAuth.code;
 		pendingOAuth = null;
-		return aesDecrypt(unlockKey, app.clientSecretEnc.iv, app.clientSecretEnc.data).then(function(secret) {
+		var secretPromise = app.builtin
+			? Promise.resolve(BUILTIN_GITEE_APP.clientSecret)
+			: aesDecrypt(unlockKey, app.clientSecretEnc.iv, app.clientSecretEnc.data);
+		return secretPromise.then(function(secret) {
 			var body = 'grant_type=authorization_code' +
 				'&code=' + encodeURIComponent(code) +
 				'&client_id=' + encodeURIComponent(app.clientId) +
@@ -983,9 +1015,18 @@
 		$('#settingAutoSave').val(config.autoSave === undefined ? '1' : (config.autoSave ? '1' : '0'));
 		// Gitee OAuth 应用配置回填
 		var app = giteeOAuthApp();
-		$('#oauthClientId').val(app ? app.clientId : '');
+		var hasBuiltin = BUILTIN_GITEE_APP && BUILTIN_GITEE_APP.clientId && BUILTIN_GITEE_APP.clientSecret;
+		$('#oauthClientId').val((!app || app.builtin) ? '' : app.clientId);
 		$('#oauthClientSecret').val('');
-		$('#oauthStatus').text(app ? (config.giteeTokens ? '已通过 OAuth 登录（Token 自动刷新）' : '应用已配置，点击下方按钮登录') : '未配置');
+		if (config.giteeTokens) {
+			$('#oauthStatus').text('已通过 OAuth 登录（Token 自动刷新）');
+		} else if (hasBuiltin) {
+			$('#oauthStatus').text('网站已内置应用凭据，直接点「使用 Gitee 登录」即可，无需填写下方内容');
+		} else if (app) {
+			$('#oauthStatus').text('应用已配置，点击下方按钮登录');
+		} else {
+			$('#oauthStatus').text('未配置');
+		}
 		updateBackendHint();
 		updateOAuthSection();
 		$('#settingsModal').modal('show');
