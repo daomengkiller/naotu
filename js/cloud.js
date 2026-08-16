@@ -26,6 +26,9 @@
 	var SAVE_DEBOUNCE_MS = 1500;
 	var VERIFY_TEXT = 'km-lock-verify';
 	var PBKDF2_ITERATIONS = 150000;
+	// 数据加密：固定盐保证相同密码在任何设备派生相同数据密钥（跨设备可解密）
+	var DATA_SALT = 'km-data-v1-fixed-salt';
+	var ENC_PREFIX = 'KMENC1:';
 
 	/* ---------------- 内置 Gitee 应用（免配置） ----------------
 	 *
@@ -56,6 +59,7 @@
 	var dirty = false;
 	var unlocked = false;
 	var unlockKey = null;        // CryptoKey，由密码派生
+	var dataKey = null;          // CryptoKey，数据加密密钥（固定盐 + 密码派生，跨设备一致）
 	var pendingOAuth = null;     // { code, state } 待处理的 Gitee OAuth 回调
 	var oauthRefreshing = false; // 防止并发刷新 token
 
@@ -136,6 +140,43 @@
 			b64ToBuf(dataB64)
 		).then(function(plain) {
 			return dec.decode(plain);
+		});
+	}
+
+	/* ---------------- 数据加密（内容级保护） ---------------- */
+
+	/**
+	 * 数据密钥：固定盐 + 访问密码派生（跨设备一致）。
+	 * 相同密码在任何设备派生相同密钥 -> 换设备设置相同密码即可解密云端数据。
+	 * 云端存储密文（KMENC1: 前缀），本地存储明文（浏览器内兜底缓存）。
+	 */
+	function deriveDataKey(password) {
+		return deriveKey(password, new TextEncoder().encode(DATA_SALT));
+	}
+
+	function dataEncryptEnabled() {
+		return config.dataEncrypt !== false && !!dataKey;
+	}
+
+	function encryptData(plainText) {
+		if (!dataEncryptEnabled()) return Promise.resolve(plainText);
+		var iv = getCrypto().getRandomValues(new Uint8Array(12));
+		var enc = new TextEncoder();
+		return getSubtle().encrypt({ name: 'AES-GCM', iv: iv }, dataKey, enc.encode(plainText))
+			.then(function(cipher) {
+				return ENC_PREFIX + bufToB64(iv) + '.' + bufToB64(cipher);
+			});
+	}
+
+	function decryptData(text) {
+		if (!dataKey || !text || text.indexOf(ENC_PREFIX) !== 0) return Promise.resolve(text);
+		var rest = text.substring(ENC_PREFIX.length);
+		var dotIdx = rest.indexOf('.');
+		if (dotIdx < 0) return Promise.reject(new Error('加密数据格式错误'));
+		var ivB64 = rest.substring(0, dotIdx);
+		var dataB64 = rest.substring(dotIdx + 1);
+		return aesDecrypt(dataKey, ivB64, dataB64).catch(function() {
+			throw new Error('数据解密失败：密码不正确或数据损坏');
 		});
 	}
 
@@ -584,34 +625,43 @@
 		var dir = dirPath();
 		var path = dir ? dir + '/' + fileName + '.km' : fileName + '.km';
 		return ghRequest('GET', repoPath(path)).then(function(data) {
+			var sha = data.sha;
 			var content = data.content;
 			// Gitee 大文件可能走 download_url，content 为空时降级
 			if (!content && data.download_url && currentBackend() === 'gitee') {
 				return fetch(data.download_url).then(function(r) { return r.text(); }).then(function(text) {
-					return { json: text, sha: data.sha };
+					return { text: text, sha: sha };
 				});
 			}
 			return {
-				json: base64ToUtf8(cleanBase64(content)),
-				sha: data.sha
+				text: base64ToUtf8(cleanBase64(content)),
+				sha: sha
 			};
+		}).then(function(res) {
+			// 解密（兼容旧明文数据：无前缀则原样返回）
+			return decryptData(res.text).then(function(json) {
+				return { json: json, sha: res.sha };
+			});
 		});
 	}
 
 	function cloudWriteFile(fileName, json, sha) {
 		var dir = dirPath();
 		var path = dir ? dir + '/' + fileName + '.km' : fileName + '.km';
-		var body = {
-			message: 'save ' + fileName + '.km via km-cloud',
-			content: utf8ToBase64(json)
-		};
-		if (sha) body.sha = sha;
-		// Gitee 创建文件用 POST，更新用 PUT；GitHub 都用 PUT
-		var method = currentBackend() === 'gitee' ? (sha ? 'PUT' : 'POST') : 'PUT';
-		return ghRequest(method, repoPath(path), body).then(function(data) {
-			if (!data) return null;
-			// GitHub: data.content.sha；Gitee: data.content.sha 或 data.sha
-			return (data.content && data.content.sha) || data.sha || null;
+		// 内容加密后再上传（密文存云端）
+		return encryptData(json).then(function(encJson) {
+			var body = {
+				message: 'save ' + fileName + '.km via km-cloud',
+				content: utf8ToBase64(encJson)
+			};
+			if (sha) body.sha = sha;
+			// Gitee 创建文件用 POST，更新用 PUT；GitHub 都用 PUT
+			var method = currentBackend() === 'gitee' ? (sha ? 'PUT' : 'POST') : 'PUT';
+			return ghRequest(method, repoPath(path), body).then(function(data) {
+				if (!data) return null;
+				// GitHub: data.content.sha；Gitee: data.content.sha 或 data.sha
+				return (data.content && data.content.sha) || data.sha || null;
+			});
 		});
 	}
 
@@ -874,13 +924,13 @@
 		$('#editorArea').hide();
 		if (firstTime) {
 			$('#lockTitle').text('首次使用：设置访问密码');
-			$('#lockSub').text('设置后每次打开本页面都需输入密码（密码不会上传，仅保存在本浏览器）');
+			$('#lockSub').text('此密码同时用于加密云端脑图数据，请牢记！多设备请设置同一密码');
 			$('#lockPw2').show();
 			$('#lockBtn').text('设置并进入');
 			$('#lockHint').text('');
 		} else {
 			$('#lockTitle').text('输入访问密码');
-			$('#lockSub').text('解锁后即可使用（Token 已加密保存，无需重复输入）');
+			$('#lockSub').text('解锁后即可使用（密码即数据加密钥匙，多设备请保持一致）');
 			$('#lockPw2').hide();
 			$('#lockBtn').text('解锁');
 			$('#lockHint').text('');
@@ -911,11 +961,17 @@
 			setupPassword(pw1).then(function(key) {
 				unlockKey = key;
 				unlocked = true;
-				// 迁移旧明文 token（如果有）
-				if (config.token) {
-					return setToken(key, config.token);
-				}
-				return null;
+				// 派生数据加密密钥（固定盐，跨设备一致）
+				return deriveDataKey(pw1).then(function(dk) {
+					dataKey = dk;
+					return null;
+				}).then(function() {
+					// 迁移旧明文 token（如果有）
+					if (config.token) {
+						return setToken(key, config.token);
+					}
+					return null;
+				});
 			}).then(function() {
 				hideLockScreen();
 				return onUnlocked();
@@ -933,18 +989,22 @@
 		tryUnlock(pw1).then(function(key) {
 			if (!key) {
 				$('#lockHint').text('密码错误，请重试').css('color', '#EB5757');
-				return;
+				return Promise.reject(new Error('__wrong_password__'));
 			}
 			unlockKey = key;
 			unlocked = true;
-			// 解密 Token 到内存供请求使用
-			return getToken(key).then(function(token) {
-				config._token = token;
-				// 迁移旧明文 token
-				if (config.token) {
-					return setToken(key, token);
-				}
-				return null;
+			// 派生数据加密密钥（固定盐，跨设备一致）
+			return deriveDataKey(pw1).then(function(dk) {
+				dataKey = dk;
+				// 解密 Token 到内存供请求使用
+				return getToken(key).then(function(token) {
+					config._token = token;
+					// 迁移旧明文 token
+					if (config.token) {
+						return setToken(key, token);
+					}
+					return null;
+				});
 			});
 		}).then(function() {
 			hideLockScreen();
@@ -956,6 +1016,7 @@
 			}
 			return null;
 		}).catch(function(err) {
+			if (err && err.message === '__wrong_password__') return; // 已提示密码错误
 			$('#lockHint').text('解锁失败：' + err.message).css('color', '#EB5757');
 		});
 	}
@@ -1013,6 +1074,7 @@
 		$('#settingRepo').val(config.repo || '');
 		$('#settingDir').val(config.dir || DEFAULT_DIR);
 		$('#settingAutoSave').val(config.autoSave === undefined ? '1' : (config.autoSave ? '1' : '0'));
+		$('#settingEncrypt').val(config.dataEncrypt === false ? '0' : '1');
 		// Gitee OAuth 应用配置回填
 		var app = giteeOAuthApp();
 		var hasBuiltin = BUILTIN_GITEE_APP && BUILTIN_GITEE_APP.clientId && BUILTIN_GITEE_APP.clientSecret;
@@ -1072,6 +1134,7 @@
 		var dir = $('#settingDir').val().trim() || DEFAULT_DIR;
 		var autoSave = $('#settingAutoSave').val() === '1';
 		var backend = $('#settingBackend').val();
+		var dataEncrypt = $('#settingEncrypt').val() !== '0';
 
 		var p;
 		if (token) {
@@ -1087,6 +1150,7 @@
 			config.dir = dir;
 			config.autoSave = autoSave;
 			config.backend = backend;
+			config.dataEncrypt = dataEncrypt;
 			saveConfig();
 			$('#settingsModal').modal('hide');
 			if (backend === 'local' || !hasCloudConfig()) {
@@ -1094,7 +1158,7 @@
 				toast('已保存为本地模式（未配置云端）');
 			} else {
 				setStatus('已配置云端（' + backendName() + '）', 'online');
-				toast('设置已保存（Token 已加密存储）');
+				toast(dataEncrypt ? '设置已保存（云端数据将加密存储）' : '设置已保存（数据加密已关闭）');
 			}
 		});
 	}
@@ -1123,10 +1187,24 @@
 		}
 		changePassword(oldPw, newPw).then(function() {
 			$('#pwModal').modal('hide');
-			// 更新内存密钥
-			return setupPassword(newPw).then(function(key) { unlockKey = key; });
-		}).then(function() {
-			toast('密码已修改');
+			// 更新内存密钥 + 重新派生数据加密密钥
+			return setupPassword(newPw).then(function(key) {
+				unlockKey = key;
+				return deriveDataKey(newPw);
+			}).then(function(dk) {
+				dataKey = dk;
+				// 当前打开的文件用新密钥立即重新加密保存（内存中是明文，直接重存）
+				if (currentFile && hasCloudConfig()) {
+					return doSave().catch(function() {});
+				}
+				return null;
+			}).then(function() {
+				if (config.dataEncrypt !== false) {
+					toast('密码已修改！注意：云端其他已加密的脑图需要用旧密码重新保存后，才能用新密码打开（本地副本不受影响）', 6000);
+				} else {
+					toast('密码已修改');
+				}
+			});
 		}).catch(function(err) {
 			$('#pwHint').text(err.message).css('color', '#EB5757');
 		});

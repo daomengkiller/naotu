@@ -207,6 +207,14 @@
 						<option value="0">关闭（仅手动点保存）</option>
 					</select>
 				</div>
+				<div class="form-group">
+					<label>数据加密（内容级保护）</label>
+					<select class="form-control" id="settingEncrypt">
+						<option value="1">开启（推荐）</option>
+						<option value="0">关闭</option>
+					</select>
+					<div class="help-text">开启后脑图内容用你的密码 AES 加密后再上传云端，云端和传输中均为密文；即使网站公开、仓库泄露，没有密码也读不了内容。多设备使用需设置<b>相同的访问密码</b>才能互相解密。<b>修改密码后，云端已加密的脑图需用旧密码重新保存一次。</b></div>
+				</div>
 				<div id="oauthSection" style="display:none;">
 					<hr>
 					<h5 style="margin-top:0;"><b>Gitee 一键登录</b>（免输 Token）</h5>
