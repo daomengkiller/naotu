@@ -39,10 +39,10 @@
 	 * 若留空（未配置），则回退到「设置」里每浏览器手动填写 Client ID/Secret 的方式。
 	 */
 	var BUILTIN_GITEE_APP = {
-		salt: '',            // 固定盐（base64）——用于从密码派生密钥
-		clientIdEnc: '',     // AES-GCM 密文：Client ID
-		clientSecretEnc: '', // AES-GCM 密文：Client Secret
-		verifierEnc: ''      // AES-GCM 密文：验证文本（校验密码是否正确）
+		salt: 'tzMP/9OKJfTHm7nzv+iWEA==',
+		clientIdEnc: 'DK8NFpUj9pfgvrd/.gRU/sIbNZHRWMK5EtBdN13+pGmMG27QYrXVWmoLA2+6jY6K6/Bh45R7vizdQRhjaaVLi7HYL5sTHXhT1LjYyct+O+0tH9JUdqEnsYrzpRF0=',
+		clientSecretEnc: 'Hk23yXvs40xUzeRa.eD+3KtTlfhU6lJ1v4BIbZnbBWfWCNlfwoqXZZkh7Z0ggSUO1fAlqj6p/Y3NdlB2R6bPmRsZWFumAMdcIYqgkPUNPAOa3aJFo2dqzSaOG/GE=',
+		verifierEnc: 'u1oc/lP5zCj4e/aY.oxLdi9Bp74tWPFYBjRKILUGvxAs6lux9VQb+YhV7OsGjfBY='
 	};
 	var MASTER_VERIFY_TEXT = 'km-master-verify-v1';
 
@@ -1243,6 +1243,10 @@
 	/* ---------------- 修改密码 ---------------- */
 
 	function promptChangePassword() {
+		if (hasBuiltinApp()) {
+			toast('当前使用全局唯一密码（内置密文），修改密码需重新生成密文：运行 tools/gen-config.js 后替换代码');
+			return;
+		}
 		$('#oldPw').val('');
 		$('#newPw').val('');
 		$('#newPw2').val('');
